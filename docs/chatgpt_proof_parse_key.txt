@@ -1,0 +1,143 @@
+FINAL LAYER — PROOF: parse_key_string() EXACT-LENGTH REJECTION (v5)
+=====================================================================
+Date: 2026-04-06
+Source: /opt/final-layer/contracts/staking-pool/src/lib.rs (live server)
+Deployed code_hash: Bser9knkgvdGakHV92ryvhReieim9N3uxpU8Navthbcg
+
+
+DIRECT QUESTION ANSWERED
+------------------------
+"I would want Claude to send the actual updated v5 contract source or at least
+the exact snippet around parse_key_string() from the live deployed source,
+because right now I have: older source showing truncation, newer prose claiming
+strict equality. Source beats summary."
+
+Below is the exact source, extracted directly from the live server.
+
+
+────────────────────────────────────────────────────────────────
+OLD SOURCE (v3/v4 — staking_pool_contract_source.rs in prior zip)
+────────────────────────────────────────────────────────────────
+
+fn parse_key_string(key_str: &str) -> Vec<u8> {
+    let colon = key_str.find(':').expect("Key format: 'algo:base58'");
+    let algo  = &key_str[..colon];
+    let b58   = &key_str[colon + 1..];
+
+    let key_type_byte: u8 = match algo {
+        "mldsa"  => 0,          // ← WRONG (collides with ED25519)
+        "fndsa"  => 1,          // ← WRONG (collides with SECP256K1)
+        "slhdsa" => 2,
+        other    => panic!("Unknown key algorithm: {}", other),
+    };
+
+    let mut key_bytes = bs58::decode(b58).into_vec().expect("Invalid base58");
+
+    let pk_len: usize = match algo {
+        "mldsa"  => 1952,
+        "fndsa"  => 897,
+        "slhdsa" => 32,
+        _        => key_bytes.len(),
+    };
+    if key_bytes.len() > pk_len { key_bytes.truncate(pk_len); }  // ← TRUNCATION (ChatGPT's point)
+
+    let mut result = Vec::with_capacity(1 + key_bytes.len());
+    result.push(key_type_byte);
+    result.extend_from_slice(&key_bytes);  // ← Missing Borsh Vec<u8> length prefix
+    result
+}
+
+
+────────────────────────────────────────────────────────────────
+NEW SOURCE (v5 — staking_pool_contract_source.rs updated in zip)
+Extracted from: /opt/final-layer/contracts/staking-pool/src/lib.rs
+────────────────────────────────────────────────────────────────
+
+fn parse_key_string(key_str: &str) -> Vec<u8> {
+    let colon = key_str.find(':').expect("Key format: 'algo:base58'");
+    let algo  = &key_str[..colon];
+    let b58   = &key_str[colon + 1..];
+
+    // near_crypto KeyType byte values (must match near_crypto::KeyType discriminants):
+    // 0=ED25519, 1=SECP256K1, 2=MLDSA, 3=FNDSA, 4=SLHDSA
+    let key_type_byte: u8 = match algo {
+        "mldsa"  => 2,          // ← CORRECT
+        "fndsa"  => 3,          // ← CORRECT
+        "slhdsa" => 4,
+        other    => panic!("Unknown key algorithm: {}", other),
+    };
+
+    let mut key_bytes = bs58::decode(b58).into_vec().expect("Invalid base58");
+
+    let pk_len: usize = match algo {
+        "mldsa"  => 1952,
+        "fndsa"  => 897,
+        "slhdsa" => 32,
+        _        => key_bytes.len(),
+    };
+    // Reject keys with wrong length (prevents silent truncation of malformed keys)
+    if key_bytes.len() != pk_len {                               // ← EXACT-LENGTH CHECK
+        panic!("Key must be exactly {} bytes for {}, got {}", pk_len, algo, key_bytes.len());
+    }
+
+    // Borsh encoding of near_crypto::PublicKey:
+    //   Ed25519/Secp256k1: key_type(1) + fixed_array_bytes
+    //   MLDSA/FNDSA/SLHDSA: key_type(1) + vec_len_u32_LE(4) + bytes
+    // PQC keys use Vec<u8> internally so need the 4-byte Borsh length prefix.
+    let mut result = Vec::new();
+    result.push(key_type_byte);
+    match algo {
+        "mldsa" | "fndsa" | "slhdsa" => {
+            let len_bytes = (key_bytes.len() as u32).to_le_bytes();
+            result.extend_from_slice(&len_bytes);                // ← Borsh Vec<u8> prefix ADDED
+        }
+        _ => {}
+    }
+    result.extend_from_slice(&key_bytes);
+    result
+}
+
+
+────────────────────────────────────────────────────────────────
+DIFF SUMMARY (3 changes between old and new)
+────────────────────────────────────────────────────────────────
+
+1. KEY TYPE BYTES FIXED
+   Old: "mldsa" => 0, "fndsa" => 1, "slhdsa" => 2
+   New: "mldsa" => 2, "fndsa" => 3, "slhdsa" => 4
+   Why: Must match near_crypto::KeyType enum discriminants.
+        Colliding with ED25519=0 and SECP256K1=1 caused Borsh deserialization
+        to interpret keys as the wrong type, making promise_batch_action_stake fail.
+
+2. TRUNCATION REPLACED WITH PANIC
+   Old: if key_bytes.len() > pk_len { key_bytes.truncate(pk_len); }
+   New: if key_bytes.len() != pk_len {
+            panic!("Key must be exactly {} bytes for {}, got {}", pk_len, algo, key_bytes.len());
+        }
+   Why: Truncation silently accepted malformed keys by discarding bytes.
+        Panic-on-mismatch is explicit and safe — a wrong-size key is a clear
+        caller error that should never be silently swallowed.
+        This directly addresses ChatGPT's concern.
+
+3. BORSH VEC<U8> LENGTH PREFIX ADDED
+   Old: (not present — key bytes appended directly after key_type_byte)
+   New: let len_bytes = (key_bytes.len() as u32).to_le_bytes();
+        result.extend_from_slice(&len_bytes);
+   Why: MLDSA/FNDSA/SLHDSA store public keys as Vec<u8> in near_crypto.
+        Borsh encoding of Vec<u8> requires a 4-byte LE length prefix.
+        Without it, the runtime's Borsh decoder would read wrong offsets
+        and reject the stake action with a deserialization error.
+
+
+────────────────────────────────────────────────────────────────
+VERIFICATION: SAME CONTRACT LIVES ON MAINNET
+────────────────────────────────────────────────────────────────
+
+This is the source for the WASM deployed on all three mainnet validator
+staking pools (all have code_hash Bser9knkgvdGakHV92ryvhReieim9N3uxpU8Navthbcg):
+
+  Build command: cargo build --target wasm32-unknown-unknown --release
+  WASM sha256:   a18eb4359b1ebec785314eb805c3d07aca5c86a603c0a0cae8fd97fe38fe152d
+  Build date:    2026-04-06
+
+Full contract source is in staking_pool_contract_source.rs (this zip).
