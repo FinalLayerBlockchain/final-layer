@@ -1,0 +1,154 @@
+FINAL LAYER — SLASHING MECHANISM TEST REPORT
+============================================
+Date: 2026-04-06
+Network: Temporary isolated testnet (NOT mainnet)
+Binary: /usr/local/bin/neard (Final Layer v1003, protocol 1003)
+Source: /opt/final-layer/build/neard/
+
+
+OVERVIEW
+--------
+This document reports the results of live slashing tests conducted on a temporary
+local testnet spun up on the Final Layer server. The testnet was destroyed after
+testing. Mainnet was not touched.
+
+
+KEY FINDING: CHALLENGE-BASED SLASHING IS DISABLED IN V1003
+-----------------------------------------------------------
+Discovered by reading the chain source code directly:
+
+File: chain/chain/src/chain.rs, line 887-889:
+
+    if header.challenges_present() {
+        return Err(Error::InvalidChallenge);
+    }
+
+This means any block that contains a challenge (including BlockDoubleSign challenges
+that would slash a double-signing validator) is REJECTED by the protocol.
+
+The data structures are fully defined (in core/primitives/src/challenge.rs):
+  - BlockDoubleSign { left_block_header: Vec<u8>, right_block_header: Vec<u8> }
+  - ChallengeBody enum: BlockDoubleSign / ChunkProofs / ChunkState
+  - SlashedValidator { account_id: AccountId, is_double_sign: bool }
+  - Challenge { body: ChallengeBody, account_id, signature, hash }
+
+The is_slashed and is_double_sign fields appear in the validators RPC response
+structure, confirming the mechanism was designed for future activation.
+
+This is not a Final Layer bug — it is inherited directly from NEAR Protocol
+where challenge-based slashing was designed and coded but never activated on
+mainnet as of protocol version v1003. The feature was put on hold pending
+further security analysis and protocol finalization.
+
+
+WHAT SLASHING CURRENTLY MEANS IN FINAL LAYER
+---------------------------------------------
+In Final Layer v1003, the ACTIVE validator penalty mechanism is:
+
+  KICKOUT (not slash):
+    - Triggered when a validator misses more than the kickout threshold of
+      expected blocks or chunks in an epoch
+    - Default thresholds: block_producer_kickout_threshold = 90%
+      (must produce ≥ 10% of expected blocks to avoid kickout)
+    - Effect: removed from the NEXT epoch validator set
+    - Stake: PRESERVED — the validator's locked balance is unchanged
+    - Recovery: re-stake at any time via staking pool to return to active set
+
+  There is currently NO mechanism that burns a validator's stake.
+  The is_slashed field in the RPC response will always be False.
+
+
+EQUIVOCATION TESTS CONDUCTED
+------------------------------
+Despite the challenge system being inactive, we tested whether equivocation
+actually occurs and whether the data structures capture it.
+
+Test 1: Dual-key single-validator (synchronized)
+  - Two nodes with same validator key connected to each other
+  - Both produced blocks but stayed synchronized (same chain)
+  - No equivocation occurred — they cooperated as one validator
+  - Result: No slash (expected — Doomslug prevents natural forks)
+
+Test 2: Dual-key single-validator (independent chains)
+  - Two nodes with same validator key, completely isolated (no P2P between them)
+  - node0: RPC=3071, produced blocks independently from genesis
+  - node1: RPC=3072, same key, produced blocks independently from same genesis
+
+  CONFIRMED EQUIVOCATION:
+    node0 block-1 hash: FiBQHq5Z1ZQRJXLyTHh6iuYtfzyEg5GKHFRxXDntJDPE
+    node1 block-1 hash: E9ANhNxqZ5maqXpvLWYv467JgaCir1iBmsgSacx6PMKY
+    Same hash: False
+
+  Both blocks were signed by the SAME validator key at height 1 but contain
+  DIFFERENT content. This IS provable equivocation by definition.
+
+  When node1 was reconnected to node0, node1 adopted node0's chain (longest
+  chain rule). The protocol did NOT auto-create a challenge because:
+    a) Challenge creation code is disabled (InvalidChallenge error)
+    b) Even if it weren't, the only block producer would be challenging itself
+
+  Result: is_slashed=False (challenge system inactive)
+
+Test 3: Fork + diverge (undo-block)
+  - node0 ran to block 26, node1 was rolled back 2 blocks via undo-block
+  - Both restarted — node1 reconnected and immediately adopted node0's chain
+  - No fork, no challenge, no slash
+  - Result: Doomslug finality prevents forks even when nodes start at different heights
+
+
+WHAT WOULD HAPPEN IF CHALLENGES WERE ENABLED
+---------------------------------------------
+If the line `return Err(Error::InvalidChallenge)` were removed:
+
+1. A fisherman or any network participant who possesses both conflicting signed
+   block headers constructs a Challenge transaction:
+     Challenge {
+       body: ChallengeBody::BlockDoubleSign {
+         left_block_header:  <borsh bytes of node0's signed block 1>,
+         right_block_header: <borsh bytes of node1's signed block 1>,
+       },
+       account_id: "fisherman.fl",
+       signature: <fisherman's signature>,
+     }
+
+2. This challenge is included in the challenges field of the next block.
+
+3. At epoch boundary, the epoch manager processes the challenge:
+   - Verifies both headers are signed by the same validator key
+   - Verifies both headers are at the same height/epoch but have different hashes
+   - Marks the validator as: SlashedValidator { account_id: "node0", is_double_sign: true }
+
+4. The slashed validator's entire locked balance is burned (set to 0).
+   - is_slashed = True
+   - stake = 0
+   - locked = 0
+
+5. The validator is permanently removed from the validator set until re-staked.
+
+
+KICKOUT TEST (Active mechanism)
+--------------------------------
+The kickout mechanism IS active and was tested via the chunk-only producer test.
+When block_producer_kickout_threshold = 10%, a node must produce at least 10%
+of expected blocks to remain in the next epoch. This was verified working
+(see chunk_endorser_test_report.txt).
+
+
+CONCLUSION
+----------
+Final Layer v1003 has a fully-specified slashing system in its data model but
+the challenge processing pipeline is disabled at the chain level. The `is_slashed`
+and `is_double_sign` fields in validator responses are always False under current
+protocol rules.
+
+The only active penalty is kickout (stake preserved, validator removed from set).
+
+Enabling the challenge system in a future protocol upgrade is technically
+straightforward — it requires removing the `InvalidChallenge` guard and activating
+the challenge validation logic already present in epoch-manager. This would be
+a significant protocol change requiring a hard fork version bump.
+
+For documentation of actual double-signing evidence collected during testing, see:
+  node0 block-1 hash: FiBQHq5Z1ZQRJXLyTHh6iuYtfzyEg5GKHFRxXDntJDPE
+  node1 block-1 hash: E9ANhNxqZ5maqXpvLWYv467JgaCir1iBmsgSacx6PMKY
+  (both signed by the same ed25519 validator key on the same localnet genesis)
