@@ -375,3 +375,153 @@ Let `S` = total staked, `T` = total shares, `R` = rewards, `f` = fee fraction:
 - Share price = `(S − R + R×f) / (T − burn + R×f×(T−burn)/(S−R))` = `(S−R)/(T−burn)` = original price ✓
 
 Share price is unchanged by fee collection. Both delegators and the validator (who receives fee shares) participate at fair value.
+
+
+---
+
+## Final Layer Security Audit Program — v3 through v7 (2026-04-07 to 2026-04-08)
+
+After the v10 on-chain deployment (which fixed bugs 1-9 above), the contract source
+underwent four rounds of external multi-AI security auditing (ChatGPT, Kimi AI,
+Perplexity, Gemini) with independent analysis. This produced contract file versions
+v4 through v7. The following additional bugs were found and fixed.
+
+**Contract version deployed after audit program: v7**
+**Deployment date:** 2026-04-08
+
+---
+
+### Audit Bug A1 - Insufficient Callback Gas (v3 to v4)
+
+**Severity:** High
+
+**What broke:**
+on_withdraw_complete() was allocated only 5 TGas. A LookupMap read plus write
+on a NEAR contract costs 3-5 TGas. Under network load the callback could run out
+of gas before completing the rollback, leaving the user's unstaked_balance at zero
+permanently.
+
+**Fix (v4):**
+Increased CALLBACK_GAS from 5 TGas to 10 TGas, providing a 2x safety margin.
+
+---
+
+### Audit Bug A2 - Zero-Share Deposit Absorption (v3 to v4)
+
+**Severity:** High
+
+**What broke:**
+deposit_and_stake() could accept a deposit and add it to total_staked_balance
+without minting any shares if the deposit amount was smaller than the current share
+price. The user's tokens would be permanently absorbed into the pool with no shares.
+
+**Fix (v4):**
+Added require!(shares > 0, "Deposit too small to mint shares") after computing
+the share count.
+
+---
+
+### Audit Bug A3 - Owner Fee Principal Drift (v3 to v5)
+
+**Severity:** High (real accounting bug)
+
+**What broke:**
+In claim_rewards(), the owner's Delegator.principal was incremented by the raw fee
+amount (od.principal += fee). Due to floor rounding in share minting,
+amount_for_shares(fee_shares) < fee whenever share price is above 1 yoctonear/share.
+This meant principal > staked, so rewards_earned view returned a negative value.
+
+**Fix (v5):**
+Update total_stake_shares and total_staked_balance first, then compute the owner's
+principal increment as self.amount_for_shares(fee_shares) using updated pool totals.
+This guarantees principal <= staked at all times.
+
+```rust
+// v5 fix: update pool totals BEFORE computing owner principal
+self.total_stake_shares = self.total_stake_shares
+    .saturating_sub(burn)
+    .saturating_add(fee_shares);
+self.total_staked_balance = self.total_staked_balance.saturating_sub(net_reward);
+
+od.stake_shares += fee_shares;
+od.principal    += self.amount_for_shares(fee_shares); // uses updated totals
+```
+
+---
+
+### Audit Bug A4 - Double-Migration Possible (v4 to v5)
+
+**Severity:** Medium
+
+**What broke:**
+migrate() could be called multiple times. On the second call it would re-read
+already-migrated state and reset pending_fee_update and upgrades_locked to defaults,
+silently discarding any pending fee update or upgrade lock.
+
+**Fix (v5):**
+Added MIGRATION_VERSION_KEY (b"mv") storage marker. migrate() now panics with
+"Already migrated" if the key exists.
+
+---
+
+### Audit Bug A5 - migrate() No-Op Path Clears In-Flight Ownership Transfer (v6 to v7)
+
+**Severity:** Medium
+
+**What broke:**
+When deploying v7 over an already-correct v5/v6 state layout, migrate() follows
+the Path A branch. The v6 implementation called write_pending_owner(None) in this
+path. If an operator called migrate() out of habit after upgrading the WASM binary,
+any active two-step ownership transfer would be silently cancelled.
+
+**Fix (v7):**
+Remove write_pending_owner(None) from the Path A branch. It belongs only in the
+Path B (v11 to v7 migration) branch where stale pre-migration state must be cleared.
+
+```rust
+// Path A: current layout -- preserve everything including pending owner
+if let Some(current) = env::state_read::<StakingPool>() {
+    env::storage_write(MIGRATION_VERSION_KEY, &[7]);
+    // v7 fix: do NOT call write_pending_owner(None) here
+    return current;
+}
+// Path B: v11 -> v7 -- clearing stale state is appropriate
+write_pending_owner(None);
+```
+
+---
+
+### Additional hardening applied during audit program (v3 to v7)
+
+These are correctness improvements identified during the multi-AI review process:
+
+- **lock_upgrades() Promise + callback:** upgrades_locked is only set inside
+  on_lock_upgrades_complete() after confirming key deletion succeeded.
+- **propose_ownership() self-transfer guard:** Prevents proposing a transfer to the
+  current owner.
+- **read_pending_owner() safe decode:** Uses .ok() chain on UTF-8 decode, returning
+  None rather than panicking on malformed storage bytes.
+- **withdraw_all() callback args:** Uses serde_json::json!() for safe serialization.
+- **shares_for_amount_post_reduce() denominator fix:** Uses net_reward not full
+  rewards as denominator, ensuring owner fee shares are priced correctly.
+- **ph == 0 guard in shares_for_amount_post_reduce():** Returns fee as 1:1 fallback
+  in degenerate pool state rather than silently giving owner zero shares.
+- **is_restake_healthy() view method:** Returns true if staking_key_bytes has the
+  expected Borsh-encoded length for a supported PQC algorithm (length check only).
+- **parse_key_string() wildcard panics:** Unknown algorithm arm calls
+  env::panic_str() rather than returning empty Vec<u8>.
+
+---
+
+### Intentionally rejected findings
+
+| Finding | Rounds raised | Decision |
+|---|---|---|
+| Floor-burn rounding in shares_for_amount | 8x | Accepted tradeoff: bounded dust leak, gas exceeds extraction by 10^21x |
+| max(total_staked, last_locked) in restake | 7x | Intentional: prevents implicit validator self-stake unstake |
+| Detached owner fee transfer ambiguity | 8x | Accepted: operationally fuzzy, no obvious value-destruction path |
+| lock_upgrades() proof-of-deletion semantics | 4x | Documented as "delete succeeded", not cryptographic proof |
+| internal_ping() zero-locked skip | 5x | Intentional: panicking would brick contract if validator fully unstakes |
+
+All rejected findings are documented in the contract source file header with
+detailed reasoning.
