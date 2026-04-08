@@ -3,7 +3,7 @@
 Final Layer is a quantum-resistant proof-of-stake blockchain. This repository contains the staking pool smart contract (v10), staking documentation, and benchmarks.
 
 Full node source: [nearcore-pq](https://github.com/FinalLayerBlockchain/nearcore-pq).  
-Chain ID: `final-layer-mainnet` · Protocol v1003 · 9 shards · ~1 second blocks · Native token: **FLC**
+Chain ID: `final-layer-mainnet` · Protocol v1005 · 9 shards · ~1 second blocks · Native token: **FLC**
 
 ---
 
@@ -34,8 +34,8 @@ Each validator runs a staking pool contract deployed to their validator account 
 | Epoch length | 43,200 blocks (~12 hours) |
 | Lockup period | 48 hours after any deposit or compound |
 | Unbonding period | 4 epochs (~48 hours) after unstaking |
-| Deposit fee | 0.1% (10 bps), paid once on entry |
-| Claim fee | 0.1% (10 bps), deducted from claimed rewards |
+| Deposit fee | 0.05% (5 bps), paid once on entry |
+| Claim fee | 5% (500 bps), deducted from claimed rewards |
 | Compound fee | None — compounding is always free |
 | Minimum stake | 1 FLC |
 
@@ -201,8 +201,8 @@ The starting APY is 20%. The protocol follows a halving schedule — reward rate
 
 | Action | Fee | Recipient |
 |---|---|---|
-| `deposit_and_stake` | 0.1% of deposit | Validator |
-| `claim_rewards` | 0.1% of rewards claimed | Validator |
+| `deposit_and_stake` | 0.05% of deposit | Validator |
+| `claim_rewards` | 5% of rewards claimed | Validator |
 | `compound` | None | — |
 | `unstake` / `unstake_all` | None | — |
 | `withdraw_all` | None | — |
@@ -213,7 +213,6 @@ The starting APY is 20%. The protocol follows a halving schedule — reward rate
 
 | Pool | Account |
 |---|---|
-| King | `king.fl` |
 | Validator 1 | `validator-1.fl` |
 | Validator 2 | `validator-2.fl` |
 
