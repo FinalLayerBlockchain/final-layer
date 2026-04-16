@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members  = ["contracts/staking-pool"]
+
+# Build the staking-pool contract:
+#   cargo build -p fl-staking-pool --target wasm32-unknown-unknown --release
